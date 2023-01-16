@@ -1,0 +1,16 @@
+## ClickUp
+*Provide links to all affected ClickUp issues you know of.*
+- https://app.clickup.com/t/task-id-here
+
+## Purpose
+*Describe the problem or feature.*
+
+## Approach
+*How does this change address the problem?*
+
+## Testing
+*How would I go about testing the feature manually?*
+
+## TODO before merge
+*Use github checklists. When solved, check the box.*
+- [ ] e.g. DB migrations to be run.
