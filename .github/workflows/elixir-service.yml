@@ -1,0 +1,183 @@
+name: Elixir service build & deploy
+
+on:
+  workflow_call:
+    inputs:
+      service_name:
+        description: "Service name (used for GHCR image path: ghcr.io/midiantechnology/<service_name>)"
+        required: true
+        type: string
+      release_name:
+        description: "Mix release name (e.g. lumina_gdpr_worker) — passed as APP_NAME build arg to the Dockerfile if the consumer uses it"
+        required: true
+        type: string
+      dokku_app_ams1:
+        description: "Dokku app name on AMS1 host"
+        required: true
+        type: string
+      dokku_app_lon1:
+        description: "Dokku app name on LON1 host"
+        required: true
+        type: string
+      checkout_lumina_common:
+        description: "Checkout lumina-common and bake into image (default true)"
+        required: false
+        type: boolean
+        default: true
+      checkout_lumina_llm:
+        description: "Checkout lumina-llm and bake into image (default false)"
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      DEPS_APP_PRIVATE_KEY:
+        required: false
+      DOKKU_AMS1_SSH_KEY:
+        required: true
+      DOKKU_LON1_SSH_KEY:
+        required: true
+      TS_OAUTH_CLIENT_ID:
+        required: true
+      TS_OAUTH_SECRET:
+        required: true
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout service repo
+        uses: actions/checkout@v4
+
+      - name: Mint GitHub App token
+        id: app-token
+        if: ${{ inputs.checkout_lumina_common || inputs.checkout_lumina_llm }}
+        uses: actions/create-github-app-token@v1
+        with:
+          # lumina-ci-deps App ID — hardcoded because org variables aren't
+          # available for private repos on the current GitHub plan. Not secret.
+          app-id: "3324775"
+          private-key: ${{ secrets.DEPS_APP_PRIVATE_KEY }}
+          owner: midiantechnology
+          repositories: lumina-common,lumina-llm
+
+      - name: Extract lumina-common SHA from mix.lock
+        id: lumina-common-sha
+        if: ${{ inputs.checkout_lumina_common }}
+        run: |
+          sha=$(sed -n 's/.*"lumina": {:git.*"\([a-f0-9]\{40\}\)".*/\1/p' mix.lock)
+          if [ -z "$sha" ]; then
+            echo "Failed to extract lumina-common SHA from mix.lock" >&2
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout lumina-common
+        if: ${{ inputs.checkout_lumina_common }}
+        uses: actions/checkout@v4
+        with:
+          repository: midiantechnology/lumina-common
+          ref: ${{ steps.lumina-common-sha.outputs.sha }}
+          token: ${{ steps.app-token.outputs.token }}
+          path: lumina-common
+
+      - name: Extract lumina-llm SHA from mix.lock
+        id: lumina-llm-sha
+        if: ${{ inputs.checkout_lumina_llm }}
+        run: |
+          sha=$(sed -n 's/.*"lumina_llm": {:git.*"\([a-f0-9]\{40\}\)".*/\1/p' mix.lock)
+          if [ -z "$sha" ]; then
+            echo "Failed to extract lumina-llm SHA from mix.lock" >&2
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout lumina-llm
+        if: ${{ inputs.checkout_lumina_llm }}
+        uses: actions/checkout@v4
+        with:
+          repository: midiantechnology/lumina-llm
+          ref: ${{ steps.lumina-llm-sha.outputs.sha }}
+          token: ${{ steps.app-token.outputs.token }}
+          path: lumina-llm
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            APP_NAME=${{ inputs.release_name }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          tags: |
+            ghcr.io/midiantechnology/${{ inputs.service_name }}:${{ github.sha }}
+            ${{ github.ref == 'refs/heads/master' && format('ghcr.io/midiantechnology/{0}:master', inputs.service_name) || '' }}
+
+  deploy-ams1:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Join Tailscale
+        uses: tailscale/github-action@v3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci-runner
+
+      - name: Configure SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DOKKU_AMS1_SSH_KEY }}
+
+      - name: Trust AMS1 host key
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H -p 22 100.106.105.129 >> ~/.ssh/known_hosts
+
+      - name: Deploy to Dokku (AMS1)
+        run: |
+          ssh dokku@100.106.105.129 \
+            git:from-image ${{ inputs.dokku_app_ams1 }} \
+            ghcr.io/midiantechnology/${{ inputs.service_name }}:${{ github.sha }}
+
+  deploy-lon1:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Join Tailscale
+        uses: tailscale/github-action@v3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci-runner
+
+      - name: Configure SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DOKKU_LON1_SSH_KEY }}
+
+      - name: Trust LON1 host key
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H -p 22 100.103.110.99 >> ~/.ssh/known_hosts
+
+      - name: Deploy to Dokku (LON1)
+        run: |
+          ssh dokku@100.103.110.99 \
+            git:from-image ${{ inputs.dokku_app_lon1 }} \
+            ghcr.io/midiantechnology/${{ inputs.service_name }}:${{ github.sha }}
