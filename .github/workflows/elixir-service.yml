@@ -12,13 +12,15 @@ on:
         required: true
         type: string
       dokku_app_ams1:
-        description: "Dokku app name on AMS1 host"
-        required: true
+        description: "Dokku app name on AMS1 host (omit to skip AMS1 deploy)"
+        required: false
         type: string
+        default: ""
       dokku_app_lon1:
-        description: "Dokku app name on LON1 host"
-        required: true
+        description: "Dokku app name on LON1 host (omit to skip LON1 deploy)"
+        required: false
         type: string
+        default: ""
       checkout_lumina_common:
         description: "Checkout lumina-common and bake into image (default true)"
         required: false
@@ -130,6 +132,7 @@ jobs:
 
   deploy-ams1:
     needs: build-and-push
+    if: ${{ inputs.dokku_app_ams1 != '' }}
     runs-on: ubuntu-latest
     steps:
       - name: Join Tailscale
@@ -157,6 +160,7 @@ jobs:
 
   deploy-lon1:
     needs: build-and-push
+    if: ${{ inputs.dokku_app_lon1 != '' }}
     runs-on: ubuntu-latest
     steps:
       - name: Join Tailscale
