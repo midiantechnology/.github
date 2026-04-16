@@ -1,0 +1,118 @@
+name: .NET service build & deploy
+
+on:
+  workflow_call:
+    inputs:
+      service_name:
+        description: "Service name (used for GHCR image path: ghcr.io/midiantechnology/<service_name>)"
+        required: true
+        type: string
+      dokku_app_ams1:
+        description: "Dokku app name on AMS1 host"
+        required: true
+        type: string
+      dokku_app_lon1:
+        description: "Dokku app name on LON1 host"
+        required: true
+        type: string
+      dockerfile_path:
+        description: "Path to the Dockerfile (default: Dockerfile at repo root)"
+        required: false
+        type: string
+        default: "Dockerfile"
+    secrets:
+      DOKKU_AMS1_SSH_KEY:
+        required: true
+      DOKKU_LON1_SSH_KEY:
+        required: true
+      TS_OAUTH_CLIENT_ID:
+        required: true
+      TS_OAUTH_SECRET:
+        required: true
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout service repo
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ inputs.dockerfile_path }}
+          platforms: linux/amd64
+          push: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          tags: |
+            ghcr.io/midiantechnology/${{ inputs.service_name }}:${{ github.sha }}
+            ${{ github.ref == 'refs/heads/master' && format('ghcr.io/midiantechnology/{0}:master', inputs.service_name) || '' }}
+
+  deploy-ams1:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Join Tailscale
+        uses: tailscale/github-action@v3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci-runner
+
+      - name: Configure SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DOKKU_AMS1_SSH_KEY }}
+
+      - name: Trust AMS1 host key
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H -p 22 100.106.105.129 >> ~/.ssh/known_hosts
+
+      - name: Deploy to Dokku (AMS1)
+        run: |
+          ssh dokku@100.106.105.129 \
+            git:from-image ${{ inputs.dokku_app_ams1 }} \
+            ghcr.io/midiantechnology/${{ inputs.service_name }}:${{ github.sha }}
+
+  deploy-lon1:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Join Tailscale
+        uses: tailscale/github-action@v3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci-runner
+
+      - name: Configure SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DOKKU_LON1_SSH_KEY }}
+
+      - name: Trust LON1 host key
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H -p 22 100.103.110.99 >> ~/.ssh/known_hosts
+
+      - name: Deploy to Dokku (LON1)
+        run: |
+          ssh dokku@100.103.110.99 \
+            git:from-image ${{ inputs.dokku_app_lon1 }} \
+            ghcr.io/midiantechnology/${{ inputs.service_name }}:${{ github.sha }}
